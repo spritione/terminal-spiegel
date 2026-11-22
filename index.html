@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0c0c">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>Terminal-Spiegel</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#0c0c0c;color:#ccc;font-family:system-ui,sans-serif}
+body{display:flex;flex-direction:column}
+#bar{display:flex;gap:6px;align-items:center;padding:6px 8px;background:#1a1a1a;border-bottom:1px solid #333;flex-wrap:wrap}
+button{background:#2a2a2a;color:#eee;border:1px solid #444;border-radius:6px;padding:8px 12px;font-size:15px}
+button.on{background:#13A10E;border-color:#13A10E;color:#fff}
+button.off{background:#C50F1F;border-color:#C50F1F;color:#fff}
+#info{font-size:12px;color:#999;flex:1;min-width:120px}
+#tabs{display:flex;gap:4px;padding:4px 8px;overflow-x:auto;background:#141414}
+#tabs button{padding:5px 10px;font-size:13px;white-space:nowrap}
+#tabs button.sel{background:#3B78FF;border-color:#3B78FF}
+#term{flex:1;overflow:auto;padding:4px;font-family:Consolas,"Cascadia Mono","DejaVu Sans Mono",monospace}
+#term div{white-space:pre;line-height:1.2}
+#setup{padding:14px;display:none;max-width:480px}
+#setup label{display:block;margin:10px 0 3px;font-size:13px;color:#aaa}
+#setup input{width:100%;padding:9px;font-size:15px;background:#1e1e1e;color:#eee;border:1px solid #444;border-radius:6px}
+#setup p{font-size:12px;color:#888}
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="go">Start</button>
+  <button id="cfgb">⚙</button>
+  <div id="info">Nicht gestartet</div>
+</div>
+<div id="tabs"></div>
+<div id="term"></div>
+<div id="setup">
+  <h3>Einstellungen</h3>
+  <label>Google OAuth Client-ID</label>
+  <input id="cid" autocomplete="off" autocapitalize="off">
+  <label>Drive-Ordnername</label>
+  <input id="fold" value="TerminalSpiegel">
+  <label>Aktualisierung (Sekunden)</label>
+  <input id="iv" type="number" min="2" value="5">
+  <p>Einrichtung siehe SETUP.txt. Die Client-ID wird nur auf diesem Handy gespeichert.</p>
+  <button id="save">Speichern und anmelden</button>
+</div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+const $=s=>document.querySelector(s);
+const SCOPE='https://www.googleapis.com/auth/drive';
+const PAL=['#0C0C0C','#0037DA','#13A10E','#3A96DD','#C50F1F','#881798','#C19C00','#CCCCCC','#767676','#3B78FF','#16C60C','#61D6D6','#E74856','#B4009E','#F9F1A5','#F2F2F2'];
+const D='https://www.googleapis.com/drive/v3/files';
+let token=null,tokExp=0,folderId=null,statusId=null,reqId=null,running=false,timer=null,lastReq=0,sel=null,data=null,wake=null,measure=0;
+const cfg=()=>({cid:localStorage.cid||'',fold:localStorage.fold||'TerminalSpiegel',iv:Math.max(2,+localStorage.iv||5)});
+const info=t=>$('#info').textContent=t;
+const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+function login(silent){return new Promise((res,rej)=>{
+  if(!window.google||!google.accounts){rej({error:'Google-Skript nicht geladen'});return;}
+  const tc=google.accounts.oauth2.initTokenClient({client_id:cfg().cid,scope:SCOPE,
+    callback:r=>{if(r.error){rej(r);return;}token=r.access_token;tokExp=Date.now()+r.expires_in*1000;res();},
+    error_callback:rej});
+  tc.requestAccessToken({prompt:silent?'':'select_account'});
+});}
+async function ensure(){if(!token||Date.now()>tokExp-60000)await login(!!token);}
+const g=(u,o={})=>fetch(u,{...o,headers:{...(o.headers||{}),Authorization:'Bearer '+token}});
+async function findId(name,parent){
+  const q=`name='${name}' and trashed=false`+(parent?` and '${parent}' in parents`:` and mimeType='application/vnd.google-apps.folder'`);
+  const r=await g(`${D}?fields=files(id)&q=${encodeURIComponent(q)}`);
+  if(r.status===401){token=null;throw 'Anmeldung abgelaufen';}
+  const j=await r.json();return j.files&&j.files[0]?j.files[0].id:null;
+}
+async function writeReq(aktion,keep){
+  const body=JSON.stringify({aktion,terminal:'alle',intervall:cfg().iv,zeit:Math.floor(Date.now()/1000)});
+  if(!keep)await ensure();
+  if(!folderId)folderId=await findId(cfg().fold);
+  if(!folderId)throw 'Ordner nicht gefunden';
+  if(!reqId)reqId=await findId('anfrage.json',folderId);
+  if(reqId){
+    return fetch(`https://www.googleapis.com/upload/drive/v3/files/${reqId}?uploadType=media`,
+      {method:'PATCH',keepalive:!!keep,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body});
+  }
+  const b='xxbound';
+  const m=`--${b}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({name:'anfrage.json',parents:[folderId]})}\r\n--${b}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${b}--`;
+  const r=await g('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+    {method:'POST',headers:{'Content-Type':'multipart/related; boundary='+b},body:m});
+  const j=await r.json();reqId=j.id;return r;
+}
+async function poll(){
+  try{
+    await ensure();
+    if(!folderId)folderId=await findId(cfg().fold);
+    if(!folderId){info('Ordner „'+cfg().fold+'“ nicht gefunden');return;}
+    if(!statusId)statusId=await findId('status.json',folderId);
+    if(!statusId){info('Warte auf status.json …');return;}
+    const r=await g(`${D}/${statusId}?alt=media`);
+    if(r.status===404){statusId=null;return;}
+    if(r.status===401){token=null;info('Anmeldung abgelaufen – Start antippen');return;}
+    data=await r.json();render();
+    if(running&&Date.now()-lastReq>60000){lastReq=Date.now();writeReq('START').catch(()=>{});}
+  }catch(e){info('Fehler: '+(e&&e.error||e&&e.message||e));}
+}
+function schedule(){clearTimeout(timer);if(!running)return;timer=setTimeout(async()=>{await poll();schedule();},cfg().iv*1000);}
+
+function render(){
+  if(!data)return;
+  const ts=data.terminals||[];
+  const alter=data.zeit?Math.max(0,Math.round(Date.now()/1000-data.zeit)):null;
+  info((data.status||'?')+(alter!==null?' · vor '+alter+' s':'')+(ts.length?' · '+ts.length+' Terminal'+(ts.length>1?'s':''):''));
+  if(!ts.find(t=>t.id===sel))sel=ts[0]?ts[0].id:null;
+  const tabs=$('#tabs');tabs.innerHTML='';tabs.style.display=ts.length>1?'flex':'none';
+  const cnt={};ts.forEach(t=>cnt[t.titel]=(cnt[t.titel]||0)+1);
+  ts.forEach(t=>{const b=document.createElement('button');b.textContent=t.titel+(cnt[t.titel]>1?' ('+t.id+')':'');
+    if(t.id===sel)b.className='sel';b.onclick=()=>{sel=t.id;render();};tabs.appendChild(b);});
+  const t=ts.find(x=>x.id===sel),box=$('#term');
+  if(!t){box.innerHTML='';return;}
+  const k=t.k;
+  if(!measure){const s=document.createElement('span');s.style.cssText='position:absolute;visibility:hidden;font:100px Consolas,"Cascadia Mono","DejaVu Sans Mono",monospace';s.textContent='MMMMMMMMMM';document.body.appendChild(s);measure=s.getBoundingClientRect().width/1000;s.remove();}
+  const fs=Math.max(4,Math.min(16,(box.clientWidth-10)/(k.w*measure)));
+  box.style.fontSize=fs+'px';
+  let h='';
+  k.z.forEach((row,y)=>{
+    h+='<div>';
+    row.forEach(([tx,at])=>{
+      let f=PAL[at&15],b=PAL[at>>4];
+      h+=`<span style="color:${f};${(at>>4)?'background:'+b:''}">${esc(tx)}</span>`;
+    });
+    h+='</div>';
+  });
+  const atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-20;
+  box.innerHTML=h||'<div> </div>';
+  if(atBottom)box.scrollTop=box.scrollHeight;
+}
+
+async function start(){
+  if(!cfg().cid){show('setup');return;}
+  try{
+    await login(false);
+    running=true;lastReq=Date.now();
+    $('#go').textContent='Stop';$('#go').className='off';
+    try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen');}catch(e){}
+    info('Sende START …');
+    await writeReq('START');
+    await poll();schedule();
+  }catch(e){running=false;$('#go').textContent='Start';$('#go').className='';info('Fehler: '+(e&&e.error||e&&e.message||e));}
+}
+async function stop(){
+  running=false;clearTimeout(timer);
+  $('#go').textContent='Start';$('#go').className='';
+  try{if(wake)wake.release();}catch(e){}
+  try{await writeReq('STOP');info('Gestoppt');}catch(e){info('STOP nicht gesendet: '+(e&&e.error||e));}
+}
+$('#go').onclick=()=>running?stop():start();
+function show(w){$('#setup').style.display=w==='setup'?'block':'none';$('#term').style.display=w==='setup'?'none':'';$('#tabs').style.display=w==='setup'?'none':$('#tabs').style.display;}
+$('#cfgb').onclick=()=>{const c=cfg();$('#cid').value=c.cid;$('#fold').value=c.fold;$('#iv').value=c.iv;show('setup');};
+$('#save').onclick=()=>{localStorage.cid=$('#cid').value.trim();localStorage.fold=$('#fold').value.trim()||'TerminalSpiegel';localStorage.iv=$('#iv').value||5;folderId=statusId=reqId=null;show('main');};
+addEventListener('pagehide',()=>{if(running&&token&&reqId){running=false;writeReq('STOP',true).catch(()=>{});}});
+addEventListener('visibilitychange',async()=>{if(running&&document.visibilityState==='visible'){try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen');}catch(e){} poll();}});
+addEventListener('resize',render);
+if(!cfg().cid)show('setup');
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
