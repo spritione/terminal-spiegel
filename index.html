@@ -43,6 +43,13 @@ button.off{background:#C50F1F;border-color:#C50F1F;color:#fff}
   <input id="fold" value="TerminalSpiegel">
   <label>Aktualisierung (Sekunden)</label>
   <input id="iv" type="number" min="2" value="5">
+  <label>Anzeige</label>
+  <select id="mode" style="width:100%;padding:9px;font-size:15px;background:#1e1e1e;color:#eee;border:1px solid #444;border-radius:6px">
+    <option value="wrap">Handy-Fenster (Umbruch, gut lesbar)</option>
+    <option value="orig">Original (alles sichtbar, klein)</option>
+  </select>
+  <label>Schriftgröße bei Umbruch (px)</label>
+  <input id="fsz" type="number" min="8" max="24" value="13">
   <p>Einrichtung siehe SETUP.txt. Die Client-ID wird nur auf diesem Handy gespeichert.</p>
   <button id="save">Speichern und anmelden</button>
 </div>
@@ -54,7 +61,7 @@ const SCOPE='https://www.googleapis.com/auth/drive';
 const PAL=['#0C0C0C','#0037DA','#13A10E','#3A96DD','#C50F1F','#881798','#C19C00','#CCCCCC','#767676','#3B78FF','#16C60C','#61D6D6','#E74856','#B4009E','#F9F1A5','#F2F2F2'];
 const D='https://www.googleapis.com/drive/v3/files';
 let token=null,tokExp=0,folderId=null,statusId=null,reqId=null,running=false,timer=null,lastReq=0,sel=null,data=null,wake=null,measure=0;
-const cfg=()=>({cid:localStorage.cid||'',fold:localStorage.fold||'TerminalSpiegel',iv:Math.max(2,+localStorage.iv||5)});
+const cfg=()=>({cid:localStorage.cid||'',fold:localStorage.fold||'TerminalSpiegel',iv:Math.max(2,+localStorage.iv||5),mode:localStorage.mode||'wrap',fs:Math.max(8,+localStorage.fsz||13)});
 const info=t=>$('#info').textContent=t;
 const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
 
@@ -119,16 +126,22 @@ function render(){
   if(!t){box.innerHTML='';return;}
   const k=t.k;
   if(!measure){const s=document.createElement('span');s.style.cssText='position:absolute;visibility:hidden;font:100px Consolas,"Cascadia Mono","DejaVu Sans Mono",monospace';s.textContent='MMMMMMMMMM';document.body.appendChild(s);measure=s.getBoundingClientRect().width/1000;s.remove();}
-  const fs=Math.max(4,Math.min(16,(box.clientWidth-10)/(k.w*measure)));
+  const wrap=cfg().mode==='wrap';
+  const fs=wrap?cfg().fs:Math.max(4,Math.min(16,(box.clientWidth-10)/(k.w*measure)));
   box.style.fontSize=fs+'px';
+  const cols=wrap?Math.max(10,Math.floor((box.clientWidth-10)/(fs*measure))):1e9;
+  const span=(tx,at)=>`<span style="color:${PAL[at&15]};${(at>>4)?'background:'+PAL[at>>4]:''}">${esc(tx)}</span>`;
   let h='';
-  k.z.forEach((row,y)=>{
-    h+='<div>';
+  k.z.forEach(row=>{
+    let line='<div>',n=0;
     row.forEach(([tx,at])=>{
-      let f=PAL[at&15],b=PAL[at>>4];
-      h+=`<span style="color:${f};${(at>>4)?'background:'+b:''}">${esc(tx)}</span>`;
+      while(tx.length){
+        const room=cols-n,part=tx.slice(0,room);
+        line+=span(part,at);n+=part.length;tx=tx.slice(part.length);
+        if(n>=cols&&tx.length){h+=line+'</div>';line='<div>';n=0;}
+      }
     });
-    h+='</div>';
+    h+=line+'</div>';
   });
   const atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-20;
   box.innerHTML=h||'<div> </div>';
@@ -155,8 +168,8 @@ async function stop(){
 }
 $('#go').onclick=()=>running?stop():start();
 function show(w){$('#setup').style.display=w==='setup'?'block':'none';$('#term').style.display=w==='setup'?'none':'';$('#tabs').style.display=w==='setup'?'none':$('#tabs').style.display;}
-$('#cfgb').onclick=()=>{const c=cfg();$('#cid').value=c.cid;$('#fold').value=c.fold;$('#iv').value=c.iv;show('setup');};
-$('#save').onclick=()=>{localStorage.cid=$('#cid').value.trim();localStorage.fold=$('#fold').value.trim()||'TerminalSpiegel';localStorage.iv=$('#iv').value||5;folderId=statusId=reqId=null;show('main');};
+$('#cfgb').onclick=()=>{const c=cfg();$('#cid').value=c.cid;$('#fold').value=c.fold;$('#iv').value=c.iv;$('#mode').value=c.mode;$('#fsz').value=c.fs;show('setup');};
+$('#save').onclick=()=>{localStorage.cid=$('#cid').value.trim();localStorage.fold=$('#fold').value.trim()||'TerminalSpiegel';localStorage.iv=$('#iv').value||5;localStorage.mode=$('#mode').value;localStorage.fsz=$('#fsz').value||13;folderId=statusId=reqId=null;show('main');render();};
 addEventListener('pagehide',()=>{if(running&&token&&reqId){running=false;writeReq('STOP',true).catch(()=>{});}});
 addEventListener('visibilitychange',async()=>{if(running&&document.visibilityState==='visible'){try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen');}catch(e){} poll();}});
 addEventListener('resize',render);
